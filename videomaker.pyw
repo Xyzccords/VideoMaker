@@ -56,6 +56,7 @@ DEFAULTS = {
     "preset": "veryfast",
     "encoder": "auto",
     "cpu_uso": "medio",
+    "paralelo": False,
 }
 
 # Estas claves guardan rutas: si apuntan a algo que ya no existe, se limpian
@@ -593,6 +594,25 @@ class App(tk.Tk):
         self.lbl_encoder.grid(row=fila[0], column=0, columnspan=3, sticky="w", pady=(2, 0))
         fila[0] += 1
         threading.Thread(target=self._detectar_encoder_fondo, daemon=True).start()
+
+        titulo("Rendimiento")
+        caja3 = ttk.Frame(cuerpo, style="Panel.TFrame")
+        caja3.grid(row=fila[0], column=0, columnspan=3, sticky="w", pady=4)
+        fila[0] += 1
+
+        ttk.Label(caja3, text="Generar videos de a 2 en paralelo:",
+                 background=C_PANEL).pack(side="left", padx=(0, 8))
+        var_paralelo = tk.BooleanVar(value=bool(self.cfg.get("paralelo", False)))
+        self.vars["paralelo"] = var_paralelo
+        Casilla(caja3, var_paralelo, C_PANEL).pack(side="left")
+
+        ttk.Label(cuerpo, style="Sub.TLabel", background=C_PANEL, wraplength=640,
+                  text="Experimental: procesa 2 videos a la vez en vez de uno por "
+                       "uno. Util cuando generas varios capitulos de una sola vez. "
+                       "Si notas errores o que se pone mas lento (poca VRAM o "
+                       "disco lento), desmarcalo.").grid(
+            row=fila[0], column=0, columnspan=3, sticky="w", pady=(2, 0))
+        fila[0] += 1
 
         titulo("Gameplays preparados")
         ttk.Label(cuerpo, style="Sub.TLabel", background=C_PANEL, wraplength=640,

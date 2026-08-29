@@ -26,12 +26,14 @@ Hay dos caminos, y el programa elige solo:
     vez de los originales en 1080p120.
 """
 
+import concurrent.futures
 import os
 import re
 import json
 import random
 import subprocess
 import tempfile
+import threading
 import time
 import unicodedata
 
@@ -366,6 +368,10 @@ def preparar_gameplays(cfg, log=print, avance=None, should_stop=None,
     def _hay_que_convertir(ruta):
         if forzar_todo:
             return True
+        # Si hay logo o marca de agua, hay que hornearlos en el clip aunque
+        # ya venga liviano: si no, quedaria sin logo/marca de agua.
+        if gameplay_pool.logo_activo(cfg) or gameplay_pool.watermark_activo(cfg):
+            return True
         return gameplay_pool.necesita_preparacion(ruta, cfg)
 
     def _ya_esta(ruta):
@@ -506,13 +512,15 @@ def segundos_por_preparar(cfg, forzar_todo=False):
     pool_dir = gameplay_pool.carpeta_pool(gameplay_dir)
     manifiesto = gameplay_pool.cargar_manifiesto(gameplay_dir)
 
+    branding = gameplay_pool.logo_activo(cfg) or gameplay_pool.watermark_activo(cfg)
+
     total = 0.0
     for origen in list_files(gameplay_dir, VIDEO_EXTS):
         clave = gameplay_pool._clave(origen, cfg)
         if manifiesto.get(clave) and os.path.isfile(
                 os.path.join(pool_dir, f"gp_{clave}.mp4")):
             continue
-        if not forzar_todo and not gameplay_pool.necesita_preparacion(origen, cfg):
+        if not forzar_todo and not branding and not gameplay_pool.necesita_preparacion(origen, cfg):
             continue
         try:
             total += gameplay_pool.info_video(origen)[2]
@@ -525,15 +533,73 @@ def segundos_por_preparar(cfg, forzar_todo=False):
 # Armado de cada video
 # ---------------------------------------------------------------------------
 
-def usa_camino_rapido(cfg):
-    """Se puede copiar el video sin recodificar solo si no hay nada encima."""
-    if cfg.get("watermark_text", "").strip():
-        return False
-    for clave in ("logo_path", "intro_path", "outro_path"):
-        ruta = cfg.get(clave) or ""
-        if ruta and os.path.isfile(ruta):
-            return False
-    return True
+def _elegir_clips_enteros(clips_pool, duracion_objetivo, margen=30):
+    """
+    Elige clips COMPLETOS del pool (sin recortarlos) hasta juntar al menos
+    duracion_objetivo + margen. Se usa para el camino de copia: como no se
+    recodifica, no se puede cortar un clip a la mitad; se pega de mas y
+    "-shortest" recorta el sobrante al final.
+    """
+    orden = clips_pool[:]
+    random.shuffle(orden)
+    seleccion, acumulado, i = [], 0.0, 0
+    while acumulado < duracion_objetivo + margen:
+        ruta, dur = orden[i % len(orden)]
+        if i and i % len(orden) == 0:
+            random.shuffle(orden)
+        seleccion.append(ruta)
+        acumulado += dur
+        i += 1
+        if i > 10000:
+            break
+    return seleccion
+
+
+def _concatenar_con_audio(clips, audio_path, destino, on_progress=None,
+                          should_stop=None):
+    """
+    Pega una lista de clips de video (ya listos, mismos parametros) y les
+    pone un audio encima, todo por copia (sin recodificar el video). El
+    resultado se recorta a la duracion del audio.
+    """
+    lista = tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
+                                        encoding="utf-8")
+    try:
+        for ruta in clips:
+            lista.write(f"file '{_escapar_concat(ruta)}'\n")
+        lista.close()
+
+        tmp = destino + ".parcial.mp4"
+        cmd = [
+            "ffmpeg", "-y", "-hide_banner", "-nostdin", "-loglevel", "error",
+            "-nostats", "-progress", "pipe:1",
+            "-f", "concat", "-safe", "0", "-i", lista.name,
+            "-i", audio_path,
+            "-map", "0:v:0", "-map", "1:a:0",
+            "-c:v", "copy",
+            "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
+            "-shortest", "-movflags", "+faststart",
+            tmp,
+        ]
+        ok, cancelado, stderr = _correr_ffmpeg(cmd, on_progress, should_stop)
+
+        if not ok:
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+            if cancelado:
+                return False
+            raise RuntimeError((stderr or "ffmpeg fallo").strip()[-1500:])
+
+        os.replace(tmp, destino)
+        return True
+    finally:
+        try:
+            os.remove(lista.name)
+        except OSError:
+            pass
 
 
 def pick_clips_for_duration(gameplay_files, gameplay_durations, target_duration):
@@ -567,47 +633,52 @@ def _escapar_concat(ruta):
 
 
 def build_video_copia(audio_path, duracion_audio, clips_pool, output_path,
-                      on_progress=None, should_stop=None):
+                      segmentos_extra=None, on_progress=None, should_stop=None):
     """
     Camino rapido: pega los gameplays ya preparados SIN recodificar el video
     y le pone el audio encima. El video se corta a la duracion del audio.
+
+    segmentos_extra puede traer "intro", "portada" y/o "outro": rutas de
+    video ya preparadas (mismo codec/formato que el pool) que se pegan
+    tambien por copia, antes o despues del contenido principal, sin
+    recodificar nada de eso tampoco.
     """
-    orden = clips_pool[:]
-    random.shuffle(orden)
+    segmentos_extra = segmentos_extra or {}
+    seleccion = _elegir_clips_enteros(clips_pool, duracion_audio)
 
-    seleccion, acumulado, i = [], 0.0, 0
-    # Se pone gameplay de sobra (30 s) y "-shortest" recorta a la medida.
-    while acumulado < duracion_audio + 30:
-        ruta, dur = orden[i % len(orden)]
-        if i and i % len(orden) == 0:
-            random.shuffle(orden)
-        seleccion.append(ruta)
-        acumulado += dur
-        i += 1
-        if i > 10000:
-            break
+    tmp_contenido = output_path + ".contenido.mp4"
+    ok = _concatenar_con_audio(seleccion, audio_path, tmp_contenido,
+                               on_progress=on_progress, should_stop=should_stop)
+    if not ok:
+        return False
 
-    lista = tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
-                                        encoding="utf-8")
+    partes = []
+    if segmentos_extra.get("intro"):
+        partes.append(segmentos_extra["intro"])
+    if segmentos_extra.get("portada"):
+        partes.append(segmentos_extra["portada"])
+    partes.append(tmp_contenido)
+    if segmentos_extra.get("outro"):
+        partes.append(segmentos_extra["outro"])
+
+    if len(partes) == 1:
+        os.replace(tmp_contenido, output_path)
+        return True
+
+    lista_final = tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
+                                              encoding="utf-8")
+    tmp = output_path + ".parcial.mp4"
     try:
-        for ruta in seleccion:
-            lista.write(f"file '{_escapar_concat(ruta)}'\n")
-        lista.close()
+        for ruta in partes:
+            lista_final.write(f"file '{_escapar_concat(ruta)}'\n")
+        lista_final.close()
 
-        tmp = output_path + ".parcial.mp4"
         cmd = [
             "ffmpeg", "-y", "-hide_banner", "-nostdin", "-loglevel", "error",
-            "-nostats", "-progress", "pipe:1",
-            "-f", "concat", "-safe", "0", "-i", lista.name,
-            "-i", audio_path,
-            "-map", "0:v:0", "-map", "1:a:0",
-            "-c:v", "copy",
-            "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
-            "-shortest", "-movflags", "+faststart",
-            tmp,
+            "-nostats", "-f", "concat", "-safe", "0", "-i", lista_final.name,
+            "-c", "copy", "-movflags", "+faststart", tmp,
         ]
-        ok, cancelado, stderr = _correr_ffmpeg(cmd, on_progress, should_stop)
-
+        ok, cancelado, stderr = _correr_ffmpeg(cmd, None, should_stop)
         if not ok:
             if os.path.exists(tmp):
                 try:
@@ -622,9 +693,14 @@ def build_video_copia(audio_path, duracion_audio, clips_pool, output_path,
         return True
     finally:
         try:
-            os.remove(lista.name)
+            os.remove(lista_final.name)
         except OSError:
             pass
+        if os.path.exists(tmp_contenido):
+            try:
+                os.remove(tmp_contenido)
+            except OSError:
+                pass
 
 
 _decoder_cache = {}
@@ -1010,7 +1086,12 @@ def generar_videos(cfg, log=print, progreso=None, should_stop=None):
     intro2_path = cfg.get("intro2_path") or ""
     intro2_ok = bool(intro2_path) and os.path.isfile(intro2_path)
     hay_portada = intro2_ok and any(t["portada_imagen"] for t in tareas)
-    rapido = usa_camino_rapido(cfg) and not hay_portada
+
+    # Se intenta SIEMPRE el camino rapido primero: el logo y la marca de
+    # agua se hornean una sola vez en el pool de gameplays (mas abajo), e
+    # intro/outro/portada se pre-arman una sola vez tambien. Si algo de eso
+    # falla, se cae a recodificar (mas abajo se avisa y se recalcula todo).
+    rapido = True
 
     # --- Reparto de la barra de progreso ----------------------------------
     # La unidad es "segundos de trabajo estimados", asi las dos etapas
@@ -1034,8 +1115,8 @@ def generar_videos(cfg, log=print, progreso=None, should_stop=None):
         progreso(frac, etapa, restante)
 
     log(f"Codificador: {etiqueta_encoder(encoder)}")
-    log("Modo: copia directa (sin recodificar)" if rapido
-        else "Modo: recodificando (hay logo, marca de agua, intro u outro)")
+    log("Modo previsto: copia directa (logo/marca de agua ya horneados en el "
+        "pool; intro/outro/portada se arman una vez y se pegan por copia)")
     log(f"Videos por crear: {len(tareas)}  ({formato_tiempo(total_audio)} de audio)"
         f"  |  ya existian: {resumen['omitidos']}")
     log("")
@@ -1050,7 +1131,7 @@ def generar_videos(cfg, log=print, progreso=None, should_stop=None):
         log("   (la proxima vez te ahorras la parte de preparar)")
     log("")
 
-    # --- Etapa 1: preparar los gameplays ----------------------------------
+    # --- Etapa 1: preparar los gameplays (con logo/marca de agua horneados) -
     if seg_preparar > 0:
         log(f"Preparando gameplays por primera vez "
             f"({formato_tiempo(seg_preparar)} de material). "
@@ -1084,54 +1165,115 @@ def generar_videos(cfg, log=print, progreso=None, should_stop=None):
     duraciones_pool = {ruta: dur for ruta, dur in clips_pool}
     rutas_pool = [ruta for ruta, _d in clips_pool]
 
-    # Si el outro es un audio (mp3, etc.) en vez de video, se le elige
-    # gameplay de fondo una sola vez, igual que al audio principal.
     outro_path = cfg.get("outro_path") or ""
     outro_es_audio = (bool(outro_path) and os.path.isfile(outro_path)
                       and os.path.splitext(outro_path)[1].lower() in AUDIO_EXTS)
-    clips_outro = None
-    if outro_es_audio and not rapido:
-        try:
-            dur_outro = get_duration(outro_path)
-            clips_outro = pick_clips_for_duration(
-                rutas_pool, duraciones_pool, dur_outro)
-        except Exception as e:
-            aviso = (f"No se pudo usar el outro de audio "
-                     f"({os.path.basename(outro_path)}): {e}")
-            log(f"  [!] {aviso}")
-            resumen["avisos"].append(aviso)
 
-    # Duracion del audio de "Intro 2" (uno solo para todo el canal, se lee
-    # una sola vez aunque haya varios fanfics/capitulos).
-    dur_intro2 = None
-    if hay_portada:
-        try:
+    # --- Etapa 1.5: pre-armar intro/outro/portada, UNA sola vez -------------
+    segmentos_extra = {}
+    portada_segmentos = {}
+    clips_outro = None      # solo se usa si se termina cayendo a recodificar
+    dur_intro2 = None       # idem
+
+    try:
+        if cfg.get("intro_path") and os.path.isfile(cfg["intro_path"]):
+            segmentos_extra["intro"] = gameplay_pool.preparar_segmento_video(
+                cfg["intro_path"], cfg)
+
+        if outro_path and os.path.isfile(outro_path):
+            if outro_es_audio:
+                dur_outro = get_duration(outro_path)
+                pool_dir = gameplay_pool.carpeta_pool(cfg["gameplay_dir"])
+                clave_outro = gameplay_pool._clave_segmento(outro_path, cfg)
+                destino_outro = os.path.join(pool_dir, f"seg_outro_{clave_outro}.mp4")
+                if not os.path.isfile(destino_outro):
+                    clips_para_outro = _elegir_clips_enteros(clips_pool, dur_outro)
+                    if not _concatenar_con_audio(clips_para_outro, outro_path,
+                                                 destino_outro, should_stop=should_stop):
+                        raise RuntimeError("no se pudo armar el outro")
+                segmentos_extra["outro"] = destino_outro
+            else:
+                segmentos_extra["outro"] = gameplay_pool.preparar_segmento_video(
+                    outro_path, cfg)
+
+        if hay_portada:
             dur_intro2 = get_duration(intro2_path)
-        except Exception as e:
-            aviso = f"No se pudo usar 'Intro 2' ({os.path.basename(intro2_path)}): {e}"
-            log(f"  [!] {aviso}")
-            resumen["avisos"].append(aviso)
+            imagenes = {t["portada_imagen"] for t in tareas if t["portada_imagen"]}
+            for imagen in imagenes:
+                portada_segmentos[imagen] = gameplay_pool.preparar_portada(
+                    imagen, intro2_path, dur_intro2, cfg)
+    except Exception as e:
+        log(f"  [i] No se pudo preparar intro/outro/portada por copia ({e}); "
+            f"se recodificara en su lugar.")
+        rapido = False
+        segmentos_extra = {}
+        portada_segmentos = {}
+
+    if not rapido:
+        # Camino normal: hay que elegir gameplay de fondo para el outro de
+        # audio (se recorta por filtro, no por copia).
+        if outro_es_audio:
+            try:
+                dur_outro = get_duration(outro_path)
+                clips_outro = pick_clips_for_duration(
+                    rutas_pool, duraciones_pool, dur_outro)
+            except Exception as e:
+                aviso = (f"No se pudo usar el outro de audio "
+                         f"({os.path.basename(outro_path)}): {e}")
+                log(f"  [!] {aviso}")
+                resumen["avisos"].append(aviso)
+        if hay_portada and dur_intro2 is None:
+            try:
+                dur_intro2 = get_duration(intro2_path)
+            except Exception as e:
+                aviso = f"No se pudo usar 'Intro 2' ({os.path.basename(intro2_path)}): {e}"
+                log(f"  [!] {aviso}")
+                resumen["avisos"].append(aviso)
 
     def _portada_para(t):
         imagen = t["portada_imagen"]
-        if not (imagen and dur_intro2):
+        if not imagen:
+            return None
+        if rapido:
+            return portada_segmentos.get(imagen)
+        if not dur_intro2:
             return None
         return (imagen, intro2_path, dur_intro2)
 
-    # --- Etapa 2: armar los videos ----------------------------------------
+    # El fallback de arriba puede haber cambiado "rapido": se recalcula el
+    # estimado para que el porcentaje de la barra no quede desfasado.
     vel = VEL_COPIA if rapido else VEL_RECODIFICAR
+    trabajo_videos = total_audio / vel
+    trabajo_total = max(trabajo_preparar + trabajo_videos, 0.001)
 
-    for n, t in enumerate(tareas, start=1):
-        if should_stop():
-            resumen["cancelado"] = True
-            break
+    # --- Etapa 2: armar los videos ----------------------------------------
+    paralelo = bool(cfg.get("paralelo")) and len(tareas) > 1
+    resumen_lock = threading.Lock()
+    hecho_lock = threading.Lock()
+    maximo_reportado = [hecho[0]]
 
+    # Reparto fijo del progreso por tarea (no depende del orden en que
+    # terminen): necesario para que la barra avance bien cuando se generan
+    # varios videos a la vez.
+    bases = []
+    acumulado = hecho[0]
+    for t in tareas:
+        bases.append(acumulado)
+        acumulado += t["duracion"] / vel
+
+    def reportar_monotono(candidato, etapa):
+        with hecho_lock:
+            if candidato > maximo_reportado[0]:
+                maximo_reportado[0] = candidato
+                reportar(candidato, etapa)
+
+    def procesar(n, t):
         nombre = os.path.basename(t["salida"])
         etapa = f"({n} de {len(tareas)})  {nombre}"
-        base = hecho[0]
+        base = bases[n - 1]
 
         def al_avanzar(seg_video, _base=base, _etapa=etapa, _dur=t["duracion"]):
-            reportar(_base + min(seg_video, _dur) / vel, _etapa)
+            reportar_monotono(_base + min(seg_video, _dur) / vel, _etapa)
 
         al_avanzar(0.0)
         log(f"Generando: {nombre}")
@@ -1141,8 +1283,13 @@ def generar_videos(cfg, log=print, progreso=None, should_stop=None):
                 raise RuntimeError("el audio esta vacio o dañado")
 
             if rapido:
+                extras_t = dict(segmentos_extra)
+                portada_seg = _portada_para(t)
+                if portada_seg:
+                    extras_t["portada"] = portada_seg
                 ok = build_video_copia(
                     t["audio"], t["duracion"], clips_pool, t["salida"],
+                    segmentos_extra=extras_t,
                     on_progress=al_avanzar, should_stop=should_stop)
             else:
                 clips = pick_clips_for_duration(
@@ -1153,17 +1300,36 @@ def generar_videos(cfg, log=print, progreso=None, should_stop=None):
                                  on_progress=al_avanzar, should_stop=should_stop,
                                  clips_outro=clips_outro, portada=_portada_para(t))
 
-            if ok:
-                resumen["hechos"] += 1
-            else:
-                resumen["cancelado"] = True
-                break
+            with resumen_lock:
+                if ok:
+                    resumen["hechos"] += 1
+                else:
+                    resumen["cancelado"] = True
         except Exception as e:
             msg = f"{t['fanfic']} -> {nombre}: {e}"
             log(f"  [ERROR] {msg}")
-            resumen["errores"].append(msg)
+            with resumen_lock:
+                resumen["errores"].append(msg)
 
-        hecho[0] = base + t["duracion"] / vel
+    if paralelo:
+        log("Generando videos de a 2 en paralelo (activado en Otras Configuraciones).")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            futuros = []
+            for n, t in enumerate(tareas, start=1):
+                if should_stop():
+                    resumen["cancelado"] = True
+                    break
+                futuros.append(pool.submit(procesar, n, t))
+            for f in futuros:
+                f.result()
+    else:
+        for n, t in enumerate(tareas, start=1):
+            if should_stop():
+                resumen["cancelado"] = True
+                break
+            procesar(n, t)
+
+    hecho[0] = maximo_reportado[0]
 
     if resumen["cancelado"]:
         progreso(min(hecho[0] / trabajo_total, 1.0), "Cancelado", 0)
