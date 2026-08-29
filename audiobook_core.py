@@ -348,10 +348,6 @@ def preparar_gameplays(cfg, log=print, avance=None, should_stop=None,
     def _hay_que_convertir(ruta):
         if forzar_todo:
             return True
-        # Si hay logo o marca de agua, hay que hornearlos en el clip aunque
-        # ya venga liviano: si no, quedaria sin logo/marca de agua.
-        if gameplay_pool.logo_activo(cfg) or gameplay_pool.watermark_activo(cfg):
-            return True
         return gameplay_pool.necesita_preparacion(ruta, cfg)
 
     def _ya_esta(ruta):
@@ -492,15 +488,13 @@ def segundos_por_preparar(cfg, forzar_todo=False):
     pool_dir = gameplay_pool.carpeta_pool(gameplay_dir)
     manifiesto = gameplay_pool.cargar_manifiesto(gameplay_dir)
 
-    branding = gameplay_pool.logo_activo(cfg) or gameplay_pool.watermark_activo(cfg)
-
     total = 0.0
     for origen in list_files(gameplay_dir, VIDEO_EXTS):
         clave = gameplay_pool._clave(origen, cfg)
         if manifiesto.get(clave) and os.path.isfile(
                 os.path.join(pool_dir, f"gp_{clave}.mp4")):
             continue
-        if not forzar_todo and not branding and not gameplay_pool.necesita_preparacion(origen, cfg):
+        if not forzar_todo and not gameplay_pool.necesita_preparacion(origen, cfg):
             continue
         try:
             total += gameplay_pool.info_video(origen)[2]
@@ -512,6 +506,18 @@ def segundos_por_preparar(cfg, forzar_todo=False):
 # ---------------------------------------------------------------------------
 # Armado de cada video
 # ---------------------------------------------------------------------------
+
+def usa_camino_rapido(cfg):
+    """
+    Se puede copiar el gameplay sin recodificar solo si no hay logo ni marca
+    de agua: esos se dibujan por video (filter_complex), no se hornean en el
+    pool, porque hacerlo obligaria a reconvertir TODA la libreria de
+    gameplays (horas de material) por unos pocos videos que se van a hacer
+    ahora. Intro/outro si se pueden pegar por copia (se pre-arman aparte,
+    son 1-2 archivos chicos, no toda la libreria).
+    """
+    return not (gameplay_pool.logo_activo(cfg) or gameplay_pool.watermark_activo(cfg))
+
 
 def _elegir_clips_enteros(clips_pool, duracion_objetivo, margen=30):
     """
@@ -1035,11 +1041,12 @@ def generar_videos(cfg, log=print, progreso=None, should_stop=None):
     encoder = detectar_encoder(cfg.get("encoder", "auto"))
     resumen["encoder"] = encoder
 
-    # Se intenta SIEMPRE el camino rapido primero: el logo y la marca de
-    # agua se hornean una sola vez en el pool de gameplays (mas abajo), e
-    # intro/outro se pre-arman una sola vez tambien. Si algo de eso falla,
-    # se cae a recodificar (mas abajo se avisa y se recalcula todo).
-    rapido = True
+    # Si hay logo o marca de agua no se puede usar copia directa (se dibujan
+    # por video, no se hornean en el pool: hacerlo obligaria a reconvertir
+    # TODA la libreria de gameplays por unos pocos videos). Si no hay logo ni
+    # marca de agua, se intenta copia directa e intro/outro se pre-arman una
+    # sola vez mas abajo; si algo de eso falla, se cae a recodificar.
+    rapido = usa_camino_rapido(cfg)
 
     # --- Reparto de la barra de progreso ----------------------------------
     # La unidad es "segundos de trabajo estimados", asi las dos etapas
@@ -1063,8 +1070,9 @@ def generar_videos(cfg, log=print, progreso=None, should_stop=None):
         progreso(frac, etapa, restante)
 
     log(f"Codificador: {etiqueta_encoder(encoder)}")
-    log("Modo previsto: copia directa (logo/marca de agua ya horneados en el "
-        "pool; intro/outro se arman una vez y se pegan por copia)")
+    log("Modo previsto: copia directa (intro/outro se arman una vez y se "
+        "pegan por copia)" if rapido
+        else "Modo: recodificando (hay logo o marca de agua)")
     log(f"Videos por crear: {len(tareas)}  ({formato_tiempo(total_audio)} de audio)"
         f"  |  ya existian: {resumen['omitidos']}")
     log("")
@@ -1079,7 +1087,7 @@ def generar_videos(cfg, log=print, progreso=None, should_stop=None):
         log("   (la proxima vez te ahorras la parte de preparar)")
     log("")
 
-    # --- Etapa 1: preparar los gameplays (con logo/marca de agua horneados) -
+    # --- Etapa 1: preparar los gameplays -----------------------------------
     if seg_preparar > 0:
         log(f"Preparando gameplays por primera vez "
             f"({formato_tiempo(seg_preparar)} de material). "
@@ -1117,35 +1125,37 @@ def generar_videos(cfg, log=print, progreso=None, should_stop=None):
     outro_es_audio = (bool(outro_path) and os.path.isfile(outro_path)
                       and os.path.splitext(outro_path)[1].lower() in AUDIO_EXTS)
 
-    # --- Etapa 1.5: pre-armar intro/outro, UNA sola vez ---------------------
+    # --- Etapa 1.5: pre-armar intro/outro, UNA sola vez (solo si vamos por
+    # copia directa; si ya hay logo/marca de agua no vale la pena intentarlo)
     segmentos_extra = {}
     clips_outro = None      # solo se usa si se termina cayendo a recodificar
 
-    try:
-        if cfg.get("intro_path") and os.path.isfile(cfg["intro_path"]):
-            segmentos_extra["intro"] = gameplay_pool.preparar_segmento_video(
-                cfg["intro_path"], cfg)
+    if rapido:
+        try:
+            if cfg.get("intro_path") and os.path.isfile(cfg["intro_path"]):
+                segmentos_extra["intro"] = gameplay_pool.preparar_segmento_video(
+                    cfg["intro_path"], cfg)
 
-        if outro_path and os.path.isfile(outro_path):
-            if outro_es_audio:
-                dur_outro = get_duration(outro_path)
-                pool_dir = gameplay_pool.carpeta_pool(cfg["gameplay_dir"])
-                clave_outro = gameplay_pool._clave_segmento(outro_path, cfg)
-                destino_outro = os.path.join(pool_dir, f"seg_outro_{clave_outro}.mp4")
-                if not os.path.isfile(destino_outro):
-                    clips_para_outro = _elegir_clips_enteros(clips_pool, dur_outro)
-                    if not _concatenar_con_audio(clips_para_outro, outro_path,
-                                                 destino_outro, should_stop=should_stop):
-                        raise RuntimeError("no se pudo armar el outro")
-                segmentos_extra["outro"] = destino_outro
-            else:
-                segmentos_extra["outro"] = gameplay_pool.preparar_segmento_video(
-                    outro_path, cfg)
-    except Exception as e:
-        log(f"  [i] No se pudo preparar intro/outro por copia ({e}); "
-            f"se recodificara en su lugar.")
-        rapido = False
-        segmentos_extra = {}
+            if outro_path and os.path.isfile(outro_path):
+                if outro_es_audio:
+                    dur_outro = get_duration(outro_path)
+                    pool_dir = gameplay_pool.carpeta_pool(cfg["gameplay_dir"])
+                    clave_outro = gameplay_pool._clave_segmento(outro_path, cfg)
+                    destino_outro = os.path.join(pool_dir, f"seg_outro_{clave_outro}.mp4")
+                    if not os.path.isfile(destino_outro):
+                        clips_para_outro = _elegir_clips_enteros(clips_pool, dur_outro)
+                        if not _concatenar_con_audio(clips_para_outro, outro_path,
+                                                     destino_outro, should_stop=should_stop):
+                            raise RuntimeError("no se pudo armar el outro")
+                    segmentos_extra["outro"] = destino_outro
+                else:
+                    segmentos_extra["outro"] = gameplay_pool.preparar_segmento_video(
+                        outro_path, cfg)
+        except Exception as e:
+            log(f"  [i] No se pudo preparar intro/outro por copia ({e}); "
+                f"se recodificara en su lugar.")
+            rapido = False
+            segmentos_extra = {}
 
     if not rapido and outro_es_audio:
         # Camino normal: hay que elegir gameplay de fondo para el outro de

@@ -196,30 +196,6 @@ def watermark_activo(cfg):
     return bool(texto) and bool(fuente) and os.path.isfile(fuente)
 
 
-def _firma_branding(cfg):
-    """
-    Identifica el logo/marca de agua actuales. Se mete en la clave de cache
-    de cada clip preparado: si cambias el logo o el texto, se vuelven a
-    hornear todos los clips del pool.
-    """
-    partes = []
-    if logo_activo(cfg):
-        try:
-            st = os.stat(cfg["logo_path"])
-            partes.append(f"logo:{st.st_size}:{int(st.st_mtime)}:"
-                          f"{cfg.get('logo_width')}:{cfg.get('logo_opacity')}")
-        except OSError:
-            partes.append("logo:?")
-    if watermark_activo(cfg):
-        try:
-            st = os.stat(cfg["font_path"])
-            partes.append(f"wm:{cfg.get('watermark_text')}:{st.st_size}:"
-                          f"{int(st.st_mtime)}:{cfg.get('font_size')}")
-        except OSError:
-            partes.append("wm:?")
-    return "|".join(partes)
-
-
 def _clave(origen, cfg):
     """Identifica un gameplay preparado. Si algo cambia, se vuelve a hacer."""
     try:
@@ -228,9 +204,7 @@ def _clave(origen, cfg):
     except OSError:
         firma = os.path.basename(origen)
     ajustes = f"{cfg['width']}x{cfg['height']}@{cfg['fps']}q{cfg['crf']}"
-    return hashlib.md5(
-        f"{firma}|{ajustes}|{_firma_branding(cfg)}".encode("utf-8")
-    ).hexdigest()[:16]
+    return hashlib.md5(f"{firma}|{ajustes}".encode("utf-8")).hexdigest()[:16]
 
 
 def _clave_segmento(origen, cfg, extra=""):
@@ -247,14 +221,7 @@ def _clave_segmento(origen, cfg, extra=""):
 
 
 def comando_preparar(origen, destino, cfg, usar_gpu=True):
-    """
-    Arma el ffmpeg que convierte un gameplay al formato comun del pool.
-
-    Si hay logo o marca de agua configurados, se hornean aqui mismo, UNA
-    sola vez por clip del pool, en vez de aplicarlos en cada video que se
-    genera despues. Asi los videos finales pueden pegarse por copia
-    (-c:v copy) aunque tengan logo o marca de agua encima.
-    """
+    """Arma el ffmpeg que convierte un gameplay al formato comun del pool."""
     ancho, alto, fps = int(cfg["width"]), int(cfg["height"]), int(cfg["fps"])
     calidad = int(cfg["crf"])
     tope = maxrate_kbps(cfg)
@@ -281,33 +248,7 @@ def comando_preparar(origen, destino, cfg, usar_gpu=True):
         filtros.append(f"crop={ancho}:{alto}")
 
     filtros += [f"fps={fps}", "setsar=1"]
-
-    inputs_extra = []
-    filter_chunks = ["[0:v]" + ",".join(filtros) + "[vbase]"]
-    label = "vbase"
-
-    if logo_activo(cfg):
-        logo_idx = 1  # [0] es el gameplay; el logo es la siguiente entrada
-        inputs_extra += ["-i", cfg["logo_path"]]
-        filter_chunks.append(
-            f"[{logo_idx}:v]scale={cfg['logo_width']}:-1,format=rgba,"
-            f"colorchannelmixer=aa={cfg['logo_opacity']}[logo]"
-        )
-        filter_chunks.append(f"[{label}][logo]overlay=(W-w)/2:(H-h)/2[vlogo]")
-        label = "vlogo"
-
-    if watermark_activo(cfg):
-        font_escaped = cfg["font_path"].replace("\\", "/").replace(":", "\\:")
-        texto = (cfg.get("watermark_text") or "").strip()
-        safe_text = texto.replace("\\", "").replace("'", "").replace(":", "")
-        filter_chunks.append(
-            f"[{label}]drawtext=fontfile='{font_escaped}':text='{safe_text}':"
-            f"x=20:y=20:fontsize={cfg['font_size']}:fontcolor=white:box=1:"
-            f"boxcolor=black@0.5:boxborderw=8[vwm]"
-        )
-        label = "vwm"
-
-    cadena = ";".join(filter_chunks)
+    cadena = "[0:v]" + ",".join(filtros) + "[v]"
 
     # Sin fotogramas B y con keyframes fijos: asi todos los archivos del pool
     # encajan entre si y despues se pueden pegar sin recodificar.
@@ -315,9 +256,8 @@ def comando_preparar(origen, destino, cfg, usar_gpu=True):
         ["ffmpeg", "-y", "-hide_banner", "-nostdin", "-loglevel", "error",
          "-nostats", "-progress", "pipe:1"]
         + entrada
-        + ["-i", origen]
-        + inputs_extra
-        + ["-filter_complex", cadena, "-map", f"[{label}]", "-an",
+        + ["-i", origen,
+           "-filter_complex", cadena, "-map", "[v]", "-an",
            "-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq",
            "-rc", "vbr", "-cq", str(calidad), "-b:v", "0",
            "-maxrate", f"{tope}k", "-bufsize", f"{tope * 2}k",
