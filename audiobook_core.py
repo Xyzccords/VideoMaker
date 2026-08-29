@@ -27,6 +27,7 @@ Hay dos caminos, y el programa elige solo:
 """
 
 import concurrent.futures
+import hashlib
 import os
 import re
 import json
@@ -294,9 +295,12 @@ def _args_codificacion(cfg, encoder):
     if encoder == "h264_nvenc":
         # preset p4 en vez de p5, y sin rc-lookahead ni spatial-aq: medido con
         # SSIM y PSNR sale igual o mejor, pesa lo mismo y va un 70% mas rapido.
+        # nvenc_preset deja probar otro (p1 = mas rapido/menos calidad, p7 =
+        # mas lento/mejor calidad) sin tocar el codigo; por defecto sigue p4.
+        nvenc_preset = cfg.get("nvenc_preset") or "p4"
         return [
             "-c:v", "h264_nvenc",
-            "-preset", "p4", "-tune", "hq",
+            "-preset", nvenc_preset, "-tune", "hq",
             "-rc", "vbr", "-cq", str(calidad), "-b:v", "0",
             "-maxrate", f"{tope}k", "-bufsize", f"{tope * 2}k",
             "-bf", "3",
@@ -519,6 +523,89 @@ def usa_camino_rapido(cfg):
     return not (gameplay_pool.logo_activo(cfg) or gameplay_pool.watermark_activo(cfg))
 
 
+def _clave_overlay(cfg):
+    partes = [f"{cfg['width']}x{cfg['height']}"]
+    if gameplay_pool.logo_activo(cfg):
+        try:
+            st = os.stat(cfg["logo_path"])
+            partes.append(f"logo:{st.st_size}:{int(st.st_mtime)}:"
+                          f"{cfg.get('logo_width')}:{cfg.get('logo_opacity')}")
+        except OSError:
+            partes.append("logo:?")
+    if gameplay_pool.watermark_activo(cfg):
+        try:
+            st = os.stat(cfg["font_path"])
+            partes.append(f"wm:{cfg.get('watermark_text')}:{st.st_size}:"
+                          f"{int(st.st_mtime)}:{cfg.get('font_size')}")
+        except OSError:
+            partes.append("wm:?")
+    return hashlib.md5("|".join(partes).encode("utf-8")).hexdigest()[:16]
+
+
+def preparar_overlay_marca(cfg):
+    """
+    Junta el logo y la marca de agua en UNA sola imagen PNG transparente del
+    tamano del video, UNA sola vez (se cachea). Asi cada video le pega un
+    solo "overlay" en vez de "overlay" (logo) + "drawtext" (marca de agua)
+    por separado.
+
+    drawtext es de los filtros mas lentos de ffmpeg porque redibuja el texto
+    en CADA fotograma del video entero; horneandolo una sola vez en una
+    imagen (con Pillow, en milisegundos) se elimina ese costo de raiz sin
+    tener que tocar el pool de gameplays.
+
+    Devuelve la ruta del PNG cacheado, o None si no hay logo ni marca de
+    agua, o si Pillow no esta instalado (el video se sigue generando igual,
+    solo que un poco mas lento, dibujando por separado como antes).
+    """
+    if not (gameplay_pool.logo_activo(cfg) or gameplay_pool.watermark_activo(cfg)):
+        return None
+
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        return None
+
+    ancho, alto = int(cfg["width"]), int(cfg["height"])
+    pool_dir = gameplay_pool.carpeta_pool(cfg["gameplay_dir"])
+    os.makedirs(pool_dir, exist_ok=True)
+    destino = os.path.join(pool_dir, f"overlay_{_clave_overlay(cfg)}.png")
+    if os.path.isfile(destino):
+        return destino
+
+    lienzo = Image.new("RGBA", (ancho, alto), (0, 0, 0, 0))
+
+    if gameplay_pool.logo_activo(cfg):
+        logo = Image.open(cfg["logo_path"]).convert("RGBA")
+        logo_w = int(cfg["logo_width"])
+        logo_h = max(1, round(logo.height * logo_w / logo.width))
+        logo = logo.resize((logo_w, logo_h), Image.LANCZOS)
+        opacidad = float(cfg.get("logo_opacity", 1.0))
+        if opacidad < 1.0:
+            alpha = logo.getchannel("A").point(lambda a: int(a * opacidad))
+            logo.putalpha(alpha)
+        pos = ((ancho - logo_w) // 2, (alto - logo_h) // 2)
+        lienzo.alpha_composite(logo, pos)
+
+    if gameplay_pool.watermark_activo(cfg):
+        texto = (cfg.get("watermark_text") or "").strip()
+        draw = ImageDraw.Draw(lienzo)
+        fuente = ImageFont.truetype(cfg["font_path"], int(cfg.get("font_size", 24)))
+        x, y = 20, 20
+        pad = 8
+        caja = draw.textbbox((x, y), texto, font=fuente)
+        draw.rectangle(
+            [caja[0] - pad, caja[1] - pad, caja[2] + pad, caja[3] + pad],
+            fill=(0, 0, 0, 128),
+        )
+        draw.text((x, y), texto, font=fuente, fill=(255, 255, 255, 255))
+
+    tmp = destino + ".tmp.png"
+    lienzo.save(tmp)
+    os.replace(tmp, destino)
+    return destino
+
+
 def _elegir_clips_enteros(clips_pool, duracion_objetivo, margen=30):
     """
     Elige clips COMPLETOS del pool (sin recortarlos) hasta juntar al menos
@@ -726,12 +813,20 @@ def hilos_cpu(cfg):
     return max(3, nucleos // 3)        # "medio": ~4 en un i5-12400F
 
 
-def _build_filter_and_inputs(clips, audio_path, cfg, usar_gpu=True, clips_outro=None):
+def _build_filter_and_inputs(clips, audio_path, cfg, usar_gpu=True, clips_outro=None,
+                             overlay_marca=None):
     """Arma inputs + filter_complex soportando intro/outro/logo/marca de agua.
 
     Si el outro es un archivo de audio (mp3, etc.) en vez de video, clips_outro
     trae los gameplays elegidos para ponerle de fondo, igual que al audio
     principal.
+
+    overlay_marca es la ruta a un PNG con el logo y la marca de agua ya
+    combinados (ver preparar_overlay_marca): si viene, se pega con un solo
+    "overlay" en vez de "overlay" + "drawtext" por separado (mucho mas
+    rapido, drawtext es de los filtros mas lentos de ffmpeg). Si es None,
+    se dibujan por separado como antes (logo con overlay, texto con
+    drawtext), por ejemplo si no hay Pillow instalado.
     """
     width, height, fps = cfg["width"], cfg["height"], cfg["fps"]
 
@@ -767,29 +862,37 @@ def _build_filter_and_inputs(clips, audio_path, cfg, usar_gpu=True, clips_outro=
     _agregar_clips(clips, "vcontent")
     content_label = "vcontent"
 
-    use_logo = bool(cfg.get("logo_path")) and os.path.isfile(cfg["logo_path"])
-    if use_logo:
-        logo_idx = idx
+    if overlay_marca:
+        # Logo + marca de agua ya combinados en un solo PNG: un overlay y listo.
+        ov_idx = idx
         idx += 1
-        inputs += ["-i", cfg["logo_path"]]
-        filter_chunks.append(
-            f"[{logo_idx}:v]scale={cfg['logo_width']}:-1,format=rgba,"
-            f"colorchannelmixer=aa={cfg['logo_opacity']}[logo]"
-        )
-        filter_chunks.append(f"[{content_label}][logo]overlay=(W-w)/2:(H-h)/2[vlogo]")
-        content_label = "vlogo"
+        inputs += ["-i", overlay_marca]
+        filter_chunks.append(f"[{content_label}][{ov_idx}:v]overlay=0:0[vmarca]")
+        content_label = "vmarca"
+    else:
+        use_logo = bool(cfg.get("logo_path")) and os.path.isfile(cfg["logo_path"])
+        if use_logo:
+            logo_idx = idx
+            idx += 1
+            inputs += ["-i", cfg["logo_path"]]
+            filter_chunks.append(
+                f"[{logo_idx}:v]scale={cfg['logo_width']}:-1,format=rgba,"
+                f"colorchannelmixer=aa={cfg['logo_opacity']}[logo]"
+            )
+            filter_chunks.append(f"[{content_label}][logo]overlay=(W-w)/2:(H-h)/2[vlogo]")
+            content_label = "vlogo"
 
-    watermark_text = (cfg.get("watermark_text") or "").strip()
-    fuente_ok = bool(cfg.get("font_path")) and os.path.isfile(cfg.get("font_path", ""))
-    if watermark_text and fuente_ok:
-        font_escaped = cfg["font_path"].replace("\\", "/").replace(":", "\\:")
-        safe_text = watermark_text.replace("\\", "").replace("'", "").replace(":", "")
-        filter_chunks.append(
-            f"[{content_label}]drawtext=fontfile='{font_escaped}':text='{safe_text}':"
-            f"x=20:y=20:fontsize={cfg['font_size']}:fontcolor=white:box=1:"
-            f"boxcolor=black@0.5:boxborderw=8[vwm]"
-        )
-        content_label = "vwm"
+        watermark_text = (cfg.get("watermark_text") or "").strip()
+        fuente_ok = bool(cfg.get("font_path")) and os.path.isfile(cfg.get("font_path", ""))
+        if watermark_text and fuente_ok:
+            font_escaped = cfg["font_path"].replace("\\", "/").replace(":", "\\:")
+            safe_text = watermark_text.replace("\\", "").replace("'", "").replace(":", "")
+            filter_chunks.append(
+                f"[{content_label}]drawtext=fontfile='{font_escaped}':text='{safe_text}':"
+                f"x=20:y=20:fontsize={cfg['font_size']}:fontcolor=white:box=1:"
+                f"boxcolor=black@0.5:boxborderw=8[vwm]"
+            )
+            content_label = "vwm"
 
     use_intro = bool(cfg.get("intro_path")) and os.path.isfile(cfg["intro_path"])
     use_outro = bool(cfg.get("outro_path")) and os.path.isfile(cfg["outro_path"])
@@ -863,7 +966,7 @@ def _build_filter_and_inputs(clips, audio_path, cfg, usar_gpu=True, clips_outro=
 
 
 def build_video(audio_path, clips, output_path, cfg, encoder, on_progress=None,
-                should_stop=None, clips_outro=None):
+                should_stop=None, clips_outro=None, overlay_marca=None):
     """Camino normal: recodifica porque hay logo, marca de agua, intro u outro."""
     tmp = output_path + ".parcial.mp4"
     hilos = hilos_cpu(cfg)
@@ -871,7 +974,8 @@ def build_video(audio_path, clips, output_path, cfg, encoder, on_progress=None,
 
     def armar(usar_gpu):
         inputs, filtro, v, a = _build_filter_and_inputs(
-            clips, audio_path, cfg, usar_gpu=usar_gpu, clips_outro=clips_outro)
+            clips, audio_path, cfg, usar_gpu=usar_gpu, clips_outro=clips_outro,
+            overlay_marca=overlay_marca)
         limites = []
         if hilos:
             limites = ["-threads", str(hilos),
@@ -1125,6 +1229,22 @@ def generar_videos(cfg, log=print, progreso=None, should_stop=None):
     outro_es_audio = (bool(outro_path) and os.path.isfile(outro_path)
                       and os.path.splitext(outro_path)[1].lower() in AUDIO_EXTS)
 
+    # Si vamos a recodificar (hay logo o marca de agua), se pre-arma UNA sola
+    # vez el logo+marca de agua combinados en un PNG (evita "drawtext" por
+    # fotograma en cada video, que es lento). Si no hay Pillow, sigue
+    # funcionando igual que antes, solo que sin esta mejora.
+    overlay_marca = None
+    if not rapido:
+        try:
+            overlay_marca = preparar_overlay_marca(cfg)
+            if overlay_marca:
+                log("Logo/marca de agua combinados en una sola imagen "
+                    "(mas rapido que dibujarlos por separado en cada frame).")
+        except Exception as e:
+            log(f"  [i] No se pudo combinar logo/marca de agua en una imagen "
+                f"({e}); se dibujan por separado (un poco mas lento).")
+            overlay_marca = None
+
     # --- Etapa 1.5: pre-armar intro/outro, UNA sola vez (solo si vamos por
     # copia directa; si ya hay logo/marca de agua no vale la pena intentarlo)
     segmentos_extra = {}
@@ -1224,7 +1344,7 @@ def generar_videos(cfg, log=print, progreso=None, should_stop=None):
                     raise RuntimeError("no se pudieron elegir clips de gameplay")
                 ok = build_video(t["audio"], clips, t["salida"], cfg, encoder,
                                  on_progress=al_avanzar, should_stop=should_stop,
-                                 clips_outro=clips_outro)
+                                 clips_outro=clips_outro, overlay_marca=overlay_marca)
 
             with resumen_lock:
                 if ok:

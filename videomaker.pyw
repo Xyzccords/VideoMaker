@@ -54,6 +54,7 @@ DEFAULTS = {
     "crf": "30",
     "preset": "veryfast",
     "encoder": "auto",
+    "nvenc_preset": "p4",
     "cpu_uso": "medio",
     "paralelo": False,
 }
@@ -67,6 +68,9 @@ PRESETS = ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "sl
 ENCODERS = ["auto", "h264_nvenc", "h264_qsv", "h264_amf", "libx264"]
 # Cuanto procesador puede usar. La GPU hace el trabajo pesado igual.
 CPU_USO = ["bajo", "medio", "maximo"]
+# Solo aplica con el codificador h264_nvenc. p1 = mas rapido/menos calidad,
+# p7 = mas lento/mejor calidad. p4 es el punto medio recomendado (por defecto).
+NVENC_PRESETS = ["p1", "p2", "p3", "p4", "p5", "p6", "p7"]
 
 # ---------------------------------------------------------------------
 # Tema visual: negro con rojo
@@ -559,6 +563,12 @@ class App(tk.Tk):
         ttk.Combobox(caja2, textvariable=var_enc, values=ENCODERS, width=12,
                      state="readonly").pack(side="left", padx=(0, 14))
 
+        ttk.Label(caja2, text="Preset NVENC:", background=C_PANEL).pack(side="left", padx=(0, 4))
+        var_nvenc = tk.StringVar(value=self.cfg.get("nvenc_preset", "p4"))
+        self.vars["nvenc_preset"] = var_nvenc
+        ttk.Combobox(caja2, textvariable=var_nvenc, values=NVENC_PRESETS, width=6,
+                     state="readonly").pack(side="left", padx=(0, 14))
+
         ttk.Label(caja2, text="Uso del CPU:", background=C_PANEL).pack(side="left", padx=(0, 4))
         var_cpu = tk.StringVar(value=self.cfg.get("cpu_uso", "medio"))
         self.vars["cpu_uso"] = var_cpu
@@ -566,11 +576,21 @@ class App(tk.Tk):
                      state="readonly").pack(side="left")
 
         ttk.Label(cuerpo, style="Sub.TLabel", background=C_PANEL, wraplength=640,
-                  text="Uso del CPU: \"medio\" es lo recomendado; el trabajo pesado "
-                       "lo hace la grafica igual. \"bajo\" si quieres seguir usando "
-                       "la PC sin que se ponga lenta. \"maximo\" solo si vas a "
-                       "dejarla sola.").grid(
+                  text="Preset NVENC: solo aplica con codificador NVIDIA. p1 = mas "
+                       "rapido pero menos calidad, p7 = mas lento pero mejor calidad. "
+                       "p4 (el que viene) ya es un buen equilibrio; prueba p2 o p3 "
+                       "si quieres exprimir un poco mas de velocidad.").grid(
             row=fila[0], column=0, columnspan=3, sticky="w", pady=(6, 0))
+        fila[0] += 1
+
+        ttk.Label(cuerpo, style="Sub.TLabel", background=C_PANEL, wraplength=640,
+                  text="Uso del CPU: si tienes logo o marca de agua, dibujarlos "
+                       "consume procesador (no grafica), asi que \"bajo\" puede "
+                       "hacerte ir mas lento de lo necesario: prueba \"medio\". Sin "
+                       "logo ni marca de agua, \"bajo\" esta bien porque el trabajo "
+                       "pesado lo hace la grafica. \"maximo\" solo si vas a dejarla "
+                       "sola.").grid(
+            row=fila[0], column=0, columnspan=3, sticky="w", pady=(2, 0))
         fila[0] += 1
 
         ttk.Label(cuerpo, style="Sub.TLabel", background=C_PANEL, wraplength=640,

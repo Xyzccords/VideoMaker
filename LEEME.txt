@@ -158,7 +158,9 @@ Configuraciones". Si agregas gameplays nuevos, solo prepara los nuevos.
 -------------------------
   - Python (ya lo tienes)
   - ffmpeg y ffprobe en el PATH (ya los tienes)
-  - Pillow, solo si quieres volver a generar el logo:  pip install Pillow
+  - Pillow (opcional pero recomendado si usas logo o marca de agua: hace
+    los videos mas rapidos; tambien hace falta si quieres volver a generar
+    el logo):  pip install Pillow
 
 Tus rutas y opciones se guardan solas en "interfaz_config.json" al cerrar.
 
