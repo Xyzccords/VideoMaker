@@ -220,11 +220,35 @@ def _clave_segmento(origen, cfg, extra=""):
     ).hexdigest()[:16]
 
 
-def comando_preparar(origen, destino, cfg, usar_gpu=True):
-    """Arma el ffmpeg que convierte un gameplay al formato comun del pool."""
-    ancho, alto, fps = int(cfg["width"]), int(cfg["height"]), int(cfg["fps"])
+def _args_codec_pool(cfg, encoder):
+    """
+    Parametros de codificacion para el pool/segmentos: sin fotogramas B y
+    con keyframes fijos, para que los archivos encajen entre si y se puedan
+    concatenar despues sin recodificar (-c:v copy).
+
+    encoder="libx264" es el fallback universal: mas lento (va por CPU) pero
+    funciona en cualquier PC, para cuando NVENC no esta disponible o falla
+    (sesiones ocupadas, driver, etc.) y no solo el decodificador.
+    """
+    fps = int(cfg["fps"])
     calidad = int(cfg["crf"])
     tope = maxrate_kbps(cfg)
+    comunes = ["-bf", "0", "-g", str(fps), "-pix_fmt", "yuv420p",
+               "-profile:v", "high", "-level", "4.1"]
+
+    if encoder == "libx264":
+        return ["-c:v", "libx264", "-preset", "veryfast", "-crf", str(calidad),
+                "-maxrate", f"{tope}k", "-bufsize", f"{tope * 2}k"] + comunes
+
+    return ["-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq",
+            "-rc", "vbr", "-cq", str(calidad), "-b:v", "0",
+            "-maxrate", f"{tope}k", "-bufsize", f"{tope * 2}k",
+            "-forced-idr", "1", "-no-scenecut", "1"] + comunes
+
+
+def comando_preparar(origen, destino, cfg, usar_gpu=True, encoder="h264_nvenc"):
+    """Arma el ffmpeg que convierte un gameplay al formato comun del pool."""
+    ancho, alto, fps = int(cfg["width"]), int(cfg["height"]), int(cfg["fps"])
 
     try:
         w_src, h_src, _dur, codec = info_video(origen)
@@ -235,7 +259,7 @@ def comando_preparar(origen, destino, cfg, usar_gpu=True):
     entrada = []
     filtros = []
 
-    dec = CUVID.get(codec) if usar_gpu else None
+    dec = CUVID.get(codec) if (usar_gpu and encoder != "libx264") else None
     if dec and cuvid_disponible():
         # La GPU decodifica Y escala de una vez: es lo que da la velocidad.
         w_esc, h_esc, hay_recorte = _medidas_escalado(w_src, h_src, ancho, alto)
@@ -250,20 +274,13 @@ def comando_preparar(origen, destino, cfg, usar_gpu=True):
     filtros += [f"fps={fps}", "setsar=1"]
     cadena = "[0:v]" + ",".join(filtros) + "[v]"
 
-    # Sin fotogramas B y con keyframes fijos: asi todos los archivos del pool
-    # encajan entre si y despues se pueden pegar sin recodificar.
     return (
         ["ffmpeg", "-y", "-hide_banner", "-nostdin", "-loglevel", "error",
          "-nostats", "-progress", "pipe:1"]
         + entrada
-        + ["-i", origen,
-           "-filter_complex", cadena, "-map", "[v]", "-an",
-           "-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq",
-           "-rc", "vbr", "-cq", str(calidad), "-b:v", "0",
-           "-maxrate", f"{tope}k", "-bufsize", f"{tope * 2}k",
-           "-bf", "0", "-g", str(fps), "-forced-idr", "1", "-no-scenecut", "1",
-           "-pix_fmt", "yuv420p", "-profile:v", "high", "-level", "4.1",
-           destino]
+        + ["-i", origen, "-filter_complex", cadena, "-map", "[v]", "-an"]
+        + _args_codec_pool(cfg, encoder)
+        + [destino]
     )
 
 
@@ -272,6 +289,9 @@ def preparar_segmento_video(origen, cfg):
     Convierte un video (intro/outro) UNA sola vez al mismo formato que el
     pool de gameplays, para poder pegarlo despues con -c:v copy. Devuelve
     la ruta del archivo cacheado (no hace nada si ya existia).
+
+    Prueba NVENC primero y cae a libx264 (CPU) si falla, para no quedarse
+    sin intro/outro solo porque la GPU esta ocupada o el driver fallo.
     """
     pool_dir = carpeta_pool(cfg["gameplay_dir"])
     os.makedirs(pool_dir, exist_ok=True)
@@ -281,33 +301,29 @@ def preparar_segmento_video(origen, cfg):
         return destino
 
     ancho, alto, fps = int(cfg["width"]), int(cfg["height"]), int(cfg["fps"])
-    calidad = int(cfg["crf"])
-    tope = maxrate_kbps(cfg)
     filtro = (f"scale={ancho}:{alto}:force_original_aspect_ratio=increase,"
               f"crop={ancho}:{alto},fps={fps},setsar=1")
-
     tmp = destino + ".parcial.mp4"
-    cmd = [
-        "ffmpeg", "-y", "-hide_banner", "-nostdin", "-loglevel", "error",
-        "-nostats", "-i", origen, "-vf", filtro,
-        "-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq",
-        "-rc", "vbr", "-cq", str(calidad), "-b:v", "0",
-        "-maxrate", f"{tope}k", "-bufsize", f"{tope * 2}k",
-        "-bf", "0", "-g", str(fps), "-forced-idr", "1", "-no-scenecut", "1",
-        "-pix_fmt", "yuv420p", "-profile:v", "high", "-level", "4.1",
-        "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
-        tmp,
-    ]
-    r = subprocess.run(cmd, capture_output=True, text=True, creationflags=_SIN_VENTANA)
-    if r.returncode != 0 or not os.path.isfile(tmp):
+
+    ultimo_error = ""
+    for encoder in ("h264_nvenc", "libx264"):
+        cmd = (
+            ["ffmpeg", "-y", "-hide_banner", "-nostdin", "-loglevel", "error",
+             "-nostats", "-i", origen, "-vf", filtro]
+            + _args_codec_pool(cfg, encoder)
+            + ["-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2", tmp]
+        )
+        r = subprocess.run(cmd, capture_output=True, text=True, creationflags=_SIN_VENTANA)
+        if r.returncode == 0 and os.path.isfile(tmp):
+            os.replace(tmp, destino)
+            return destino
+        ultimo_error = r.stderr or ultimo_error
         if os.path.isfile(tmp):
             try:
                 os.remove(tmp)
             except OSError:
                 pass
-        raise RuntimeError((r.stderr or "ffmpeg fallo al preparar el segmento").strip()[-500:])
 
-    os.replace(tmp, destino)
-    return destino
+    raise RuntimeError((ultimo_error or "ffmpeg fallo al preparar el segmento").strip()[-500:])
 
 

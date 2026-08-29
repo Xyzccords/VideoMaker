@@ -403,8 +403,22 @@ def preparar_gameplays(cfg, log=print, avance=None, should_stop=None,
 
         tmp = destino + ".parcial.mp4"
         ok = False
-        for usar_gpu in (True, False):
-            cmd = gameplay_pool.comando_preparar(origen, tmp, cfg, usar_gpu=usar_gpu)
+        # Los primeros dos intentos usan NVENC (decodificando por GPU o por
+        # CPU); si NVENC mismo esta roto o sin sesiones libres (no el
+        # decodificador), esos dos van a fallar igual. El tercero fuerza
+        # libx264 (CPU, mas lento pero funciona en cualquier PC) para no
+        # terminar sin nada.
+        intentos = [
+            (True, "h264_nvenc", None),
+            (False, "h264_nvenc", "  [i] La GPU no pudo con este archivo, se reintenta por CPU."),
+            (False, "libx264", "  [i] NVENC no pudo con este archivo, se reintenta con "
+                                "libx264 (CPU, mas lento pero deberia funcionar)."),
+        ]
+        for usar_gpu, encoder_intento, aviso in intentos:
+            if aviso:
+                log(aviso)
+            cmd = gameplay_pool.comando_preparar(origen, tmp, cfg, usar_gpu=usar_gpu,
+                                                 encoder=encoder_intento)
             ok, cancelado, stderr = _correr_ffmpeg(
                 cmd,
                 on_progress=lambda seg, base=hechos_seg, et=etiqueta: avance(
@@ -420,8 +434,6 @@ def preparar_gameplays(cfg, log=print, avance=None, should_stop=None,
                 return listos
             if ok:
                 break
-            if usar_gpu:
-                log("  [i] La GPU no pudo con este archivo, se reintenta por CPU.")
 
         if not ok:
             log(f"  [!] No se pudo preparar {os.path.basename(origen)}: "
@@ -966,13 +978,14 @@ def _build_filter_and_inputs(clips, audio_path, cfg, usar_gpu=True, clips_outro=
 
 
 def build_video(audio_path, clips, output_path, cfg, encoder, on_progress=None,
-                should_stop=None, clips_outro=None, overlay_marca=None):
+                should_stop=None, clips_outro=None, overlay_marca=None, log=None):
     """Camino normal: recodifica porque hay logo, marca de agua, intro u outro."""
+    log = log or (lambda *a: None)
     tmp = output_path + ".parcial.mp4"
     hilos = hilos_cpu(cfg)
     modo = (cfg.get("cpu_uso") or "medio").lower()
 
-    def armar(usar_gpu):
+    def armar(usar_gpu, encoder_efectivo):
         inputs, filtro, v, a = _build_filter_and_inputs(
             clips, audio_path, cfg, usar_gpu=usar_gpu, clips_outro=clips_outro,
             overlay_marca=overlay_marca)
@@ -985,24 +998,44 @@ def build_video(audio_path, clips, output_path, cfg, encoder, on_progress=None,
              "-loglevel", "error", "-nostats", "-progress", "pipe:1"]
             + limites + inputs
             + ["-filter_complex", filtro, "-map", f"[{v}]", "-map", f"[{a}]"]
-            + _args_codificacion(cfg, encoder)
+            + _args_codificacion(cfg, encoder_efectivo)
             + ["-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
                "-movflags", "+faststart", tmp]
         )
 
     baja = modo != "maximo"
     ok, cancelado, stderr = _correr_ffmpeg(
-        armar(True), on_progress, should_stop, prioridad_baja=baja)
+        armar(True, encoder), on_progress, should_stop, prioridad_baja=baja)
 
-    # Si la GPU no pudo con algun archivo, se reintenta todo por CPU.
+    # Si la GPU no pudo con algun archivo, se reintenta con el MISMO
+    # codificador pero decodificando por CPU (puede que solo el
+    # decodificador haya fallado, no el codificador).
     if not ok and not cancelado:
+        log(f"  [i] Fallo el decodificador por GPU, se reintenta por CPU "
+            f"(codificador: {encoder}).")
         if os.path.exists(tmp):
             try:
                 os.remove(tmp)
             except OSError:
                 pass
         ok, cancelado, stderr = _correr_ffmpeg(
-            armar(False), on_progress, should_stop, prioridad_baja=baja)
+            armar(False, encoder), on_progress, should_stop, prioridad_baja=baja)
+
+    # Si el codificador por hardware esta roto de verdad (sesion no
+    # disponible, driver, GPU ocupada) los dos intentos de arriba fallan
+    # identico, porque ambos usan el mismo codificador. Se fuerza libx264
+    # (CPU, mas lento pero funciona en cualquier PC) para no quedarse sin
+    # el video.
+    if not ok and not cancelado and encoder != "libx264":
+        log(f"  [!] El codificador {encoder} no funciono (revisa la GPU/drivers); "
+            f"se usa libx264 por CPU para este video (mas lento).")
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+        ok, cancelado, stderr = _correr_ffmpeg(
+            armar(False, "libx264"), on_progress, should_stop, prioridad_baja=baja)
 
     if not ok:
         if os.path.exists(tmp):
@@ -1344,7 +1377,8 @@ def generar_videos(cfg, log=print, progreso=None, should_stop=None):
                     raise RuntimeError("no se pudieron elegir clips de gameplay")
                 ok = build_video(t["audio"], clips, t["salida"], cfg, encoder,
                                  on_progress=al_avanzar, should_stop=should_stop,
-                                 clips_outro=clips_outro, overlay_marca=overlay_marca)
+                                 clips_outro=clips_outro, overlay_marca=overlay_marca,
+                                 log=log)
 
             with resumen_lock:
                 if ok:
