@@ -1,0 +1,95 @@
+VIDEOMAKER AUTOMATICO
+=====================
+Instrucciones para instalarlo en esta PC.
+
+
+PASO 1 - DESCOMPRIMIR
+---------------------
+Descomprime el RAR COMPLETO en donde quieras (por ejemplo el Escritorio o
+Documentos). Da igual la carpeta, pero tiene que quedar entera: no saques
+archivos sueltos ni borres la carpeta "bin".
+
+
+PASO 2 - DOBLE CLIC EN:
+-----------------------
+    INSTALAR - doble clic la primera vez.bat
+
+Eso crea el acceso directo "VideoMaker Automatico" en el Escritorio, con
+su logo. Tarda un segundo. Solo hay que hacerlo UNA vez.
+
+
+PASO 3 - USARLO
+---------------
+Abre "VideoMaker Automatico" desde el Escritorio. Ya esta.
+
+
+-------------------------------------------------------------------------
+QUE NECESITA ESTA PC
+-------------------------------------------------------------------------
+
+  - Python.  Si no lo tiene, el instalador te avisa.
+             Se baja de https://www.python.org/downloads/
+             IMPORTANTE: al instalarlo, marca la casilla
+             "Add Python to PATH".
+
+  - ffmpeg.  NO hace falta instalarlo: ya viene incluido dentro de la
+             carpeta "bin" de este paquete.
+
+  - Tarjeta grafica: si la PC tiene una NVIDIA, el programa la usa y va
+             muy rapido. Si no tiene, funciona igual pero mas lento, sin
+             que haya que cambiar nada.
+
+
+-------------------------------------------------------------------------
+COMO SE USA EL PROGRAMA
+-------------------------------------------------------------------------
+
+1) Arriba pones UNA sola ruta: la carpeta del canal (la que tiene dentro
+   una carpeta por cada fanfic).
+
+2) Aparece solo la lista de fanfics. El programa entra a cada uno, busca
+   dentro la subcarpeta "Español" y de ahi saca los audios.
+
+3) Todos salen marcados. Desmarca los que no quieras exportar.
+
+4) Abre "Otras Configuraciones" y pon la CARPETA DE GAMEPLAYS (los videos
+   de fondo). Es obligatoria y es la unica que hay que configurar.
+
+5) Boton "Generar videos".
+
+Los videos quedan en una carpeta "VIDEOS" que se crea sola dentro de la
+carpeta del canal, con el nombre del fanfic y los capitulos:
+
+    Naruto_ My Sharingan Has An Exp Bar_1-8.mp4
+
+Los que ya existen se saltan solos, asi que puedes darle a "Generar
+videos" las veces que quieras: solo hara los que falten.
+
+
+-------------------------------------------------------------------------
+LA PRIMERA VEZ TARDA MAS (es normal)
+-------------------------------------------------------------------------
+Antes de hacer el primer video, el programa convierte tus gameplays a una
+version ligera y la guarda en una subcarpeta "_VideoMaker_listos" dentro
+de la carpeta de gameplays.
+
+Eso tarda un rato UNA sola vez, y es lo que hace que despues todos los
+videos salgan mucho mas rapido. Si agregas gameplays nuevos, solo prepara
+los nuevos. Esa carpeta se puede borrar sin miedo cuando quieras.
+
+Hay mas detalle en el archivo "LEEME.txt".
+
+
+-------------------------------------------------------------------------
+SI ALGO FALLA
+-------------------------------------------------------------------------
+
+"No encuentro Python en esta PC"
+    Instala Python y marca "Add Python to PATH". Luego vuelve a ejecutar
+    el instalador.
+
+"No encuentro videomaker.pyw"
+    Sacaste archivos sueltos del RAR. Descomprimelo entero otra vez.
+
+El acceso directo dejo de funcionar
+    Moviste la carpeta de sitio. Vuelve a ejecutar el instalador.
