@@ -42,14 +42,9 @@ import gameplay_pool
 
 AUDIO_EXTS = (".mp3", ".wav", ".m4a", ".flac", ".ogg", ".opus", ".aac", ".wma")
 VIDEO_EXTS = (".mp4", ".mkv", ".mov", ".avi", ".webm")
-IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
 
 CARPETA_VIDEOS = "VIDEOS"
 NOMBRES_ESPANOL = ("espanol", "espaniol", "spanish", "es")
-# Segunda intro por fanfic: "portada.jpg" + "portada.mp3" dentro de su
-# carpeta "Español". Se muestra la imagen mientras suena ese audio, justo
-# despues de la intro general.
-NOMBRE_PORTADA = "portada"
 
 # Un audio tocado hace menos de esto se considera "todavia se esta grabando".
 SEGUNDOS_RECIEN_ESCRITO = 90
@@ -178,12 +173,6 @@ def _carpeta_espanol(carpeta_fanfic):
     return None
 
 
-def _es_portada(ruta):
-    """True si el archivo se llama 'portada' (sin importar acentos/mayusculas)."""
-    base = os.path.splitext(os.path.basename(ruta))[0]
-    return _sin_acentos(base) == NOMBRE_PORTADA
-
-
 def rango_capitulos(nombre_archivo):
     """
     'Capitulo 1 al 11.mp3' -> '1-11'
@@ -210,13 +199,7 @@ def escanear_canal(carpeta_canal):
     Recorre la carpeta del canal (BOLILLO) y devuelve la lista de fanfics.
 
     Cada elemento es un dict:
-        {"titulo": str, "carpeta": str, "carpeta_es": str, "audios": [rutas],
-         "portada_imagen": ruta o None}
-
-    Si dentro de la carpeta "Español" hay un "portada.jpg" (o .png, etc.), es
-    la imagen de ese fanfic para el "Intro 2": se muestra junto con el audio
-    de "Intro 2" (configurado una sola vez para todo el canal), justo
-    despues de la intro general. No cuenta como capitulo.
+        {"titulo": str, "carpeta": str, "carpeta_es": str, "audios": [rutas]}
 
     Se incluyen tambien los fanfics que todavia no tienen audios (con la
     lista vacia), para que se vean en la interfaz.
@@ -236,15 +219,12 @@ def escanear_canal(carpeta_canal):
             continue
 
         audios = sorted(list_files(carpeta_es, AUDIO_EXTS), key=_clave_orden)
-        portada_imagen = next(
-            (i for i in list_files(carpeta_es, IMAGE_EXTS) if _es_portada(i)), None)
 
         fanfics.append({
             "titulo": entrada.name,
             "carpeta": entrada.path,
             "carpeta_es": carpeta_es,
             "audios": audios,
-            "portada_imagen": portada_imagen,
         })
 
     return fanfics
@@ -638,10 +618,10 @@ def build_video_copia(audio_path, duracion_audio, clips_pool, output_path,
     Camino rapido: pega los gameplays ya preparados SIN recodificar el video
     y le pone el audio encima. El video se corta a la duracion del audio.
 
-    segmentos_extra puede traer "intro", "portada" y/o "outro": rutas de
-    video ya preparadas (mismo codec/formato que el pool) que se pegan
-    tambien por copia, antes o despues del contenido principal, sin
-    recodificar nada de eso tampoco.
+    segmentos_extra puede traer "intro" y/o "outro": rutas de video ya
+    preparadas (mismo codec/formato que el pool) que se pegan tambien por
+    copia, antes o despues del contenido principal, sin recodificar nada
+    de eso tampoco.
     """
     segmentos_extra = segmentos_extra or {}
     seleccion = _elegir_clips_enteros(clips_pool, duracion_audio)
@@ -655,8 +635,6 @@ def build_video_copia(audio_path, duracion_audio, clips_pool, output_path,
     partes = []
     if segmentos_extra.get("intro"):
         partes.append(segmentos_extra["intro"])
-    if segmentos_extra.get("portada"):
-        partes.append(segmentos_extra["portada"])
     partes.append(tmp_contenido)
     if segmentos_extra.get("outro"):
         partes.append(segmentos_extra["outro"])
@@ -742,17 +720,12 @@ def hilos_cpu(cfg):
     return max(3, nucleos // 3)        # "medio": ~4 en un i5-12400F
 
 
-def _build_filter_and_inputs(clips, audio_path, cfg, usar_gpu=True, clips_outro=None,
-                             portada=None):
+def _build_filter_and_inputs(clips, audio_path, cfg, usar_gpu=True, clips_outro=None):
     """Arma inputs + filter_complex soportando intro/outro/logo/marca de agua.
 
     Si el outro es un archivo de audio (mp3, etc.) en vez de video, clips_outro
     trae los gameplays elegidos para ponerle de fondo, igual que al audio
     principal.
-
-    portada es (imagen_path, audio_path, duracion) o None: es la "segunda
-    intro" de este fanfic, se muestra la imagen fija mientras suena ese
-    audio, justo despues de la intro general.
     """
     width, height, fps = cfg["width"], cfg["height"], cfg["fps"]
 
@@ -831,16 +804,6 @@ def _build_filter_and_inputs(clips, audio_path, cfg, usar_gpu=True, clips_outro=
         idx += 1
         inputs += _dec(cfg["outro_path"]) + ["-i", cfg["outro_path"]]
 
-    portada_v_idx = portada_a_idx = None
-    if portada:
-        imagen_portada, audio_portada, dur_portada = portada
-        portada_v_idx = idx
-        idx += 1
-        inputs += ["-loop", "1", "-t", f"{dur_portada:.3f}", "-i", imagen_portada]
-        portada_a_idx = idx
-        idx += 1
-        inputs += ["-i", audio_portada]
-
     audio_idx = idx
     idx += 1
     inputs += ["-i", audio_path]
@@ -856,16 +819,6 @@ def _build_filter_and_inputs(clips, audio_path, cfg, usar_gpu=True, clips_outro=
             f"[{intro_idx}:a]aformat=sample_rates=44100:channel_layouts=stereo[introa]"
         )
         segments.append(("introv", "introa"))
-
-    if portada:
-        filter_chunks.append(
-            f"[{portada_v_idx}:v]scale={width}:{height}:force_original_aspect_ratio=increase,"
-            f"crop={width}:{height},fps={fps},setsar=1[portadav]"
-        )
-        filter_chunks.append(
-            f"[{portada_a_idx}:a]aformat=sample_rates=44100:channel_layouts=stereo[portadaa]"
-        )
-        segments.append(("portadav", "portadaa"))
 
     filter_chunks.append(
         f"[{audio_idx}:a]aformat=sample_rates=44100:channel_layouts=stereo[maina]"
@@ -904,7 +857,7 @@ def _build_filter_and_inputs(clips, audio_path, cfg, usar_gpu=True, clips_outro=
 
 
 def build_video(audio_path, clips, output_path, cfg, encoder, on_progress=None,
-                should_stop=None, clips_outro=None, portada=None):
+                should_stop=None, clips_outro=None):
     """Camino normal: recodifica porque hay logo, marca de agua, intro u outro."""
     tmp = output_path + ".parcial.mp4"
     hilos = hilos_cpu(cfg)
@@ -912,8 +865,7 @@ def build_video(audio_path, clips, output_path, cfg, encoder, on_progress=None,
 
     def armar(usar_gpu):
         inputs, filtro, v, a = _build_filter_and_inputs(
-            clips, audio_path, cfg, usar_gpu=usar_gpu, clips_outro=clips_outro,
-            portada=portada)
+            clips, audio_path, cfg, usar_gpu=usar_gpu, clips_outro=clips_outro)
         limites = []
         if hilos:
             limites = ["-threads", str(hilos),
@@ -1056,8 +1008,7 @@ def generar_videos(cfg, log=print, progreso=None, should_stop=None):
                 resumen["avisos"].append(aviso)
                 continue
 
-            tareas.append({"fanfic": f["titulo"], "audio": audio, "salida": salida,
-                          "portada_imagen": f.get("portada_imagen")})
+            tareas.append({"fanfic": f["titulo"], "audio": audio, "salida": salida})
 
     if not tareas:
         log("Todos los videos de los fanfics seleccionados ya estaban creados.")
@@ -1083,14 +1034,11 @@ def generar_videos(cfg, log=print, progreso=None, should_stop=None):
 
     encoder = detectar_encoder(cfg.get("encoder", "auto"))
     resumen["encoder"] = encoder
-    intro2_path = cfg.get("intro2_path") or ""
-    intro2_ok = bool(intro2_path) and os.path.isfile(intro2_path)
-    hay_portada = intro2_ok and any(t["portada_imagen"] for t in tareas)
 
     # Se intenta SIEMPRE el camino rapido primero: el logo y la marca de
     # agua se hornean una sola vez en el pool de gameplays (mas abajo), e
-    # intro/outro/portada se pre-arman una sola vez tambien. Si algo de eso
-    # falla, se cae a recodificar (mas abajo se avisa y se recalcula todo).
+    # intro/outro se pre-arman una sola vez tambien. Si algo de eso falla,
+    # se cae a recodificar (mas abajo se avisa y se recalcula todo).
     rapido = True
 
     # --- Reparto de la barra de progreso ----------------------------------
@@ -1116,7 +1064,7 @@ def generar_videos(cfg, log=print, progreso=None, should_stop=None):
 
     log(f"Codificador: {etiqueta_encoder(encoder)}")
     log("Modo previsto: copia directa (logo/marca de agua ya horneados en el "
-        "pool; intro/outro/portada se arman una vez y se pegan por copia)")
+        "pool; intro/outro se arman una vez y se pegan por copia)")
     log(f"Videos por crear: {len(tareas)}  ({formato_tiempo(total_audio)} de audio)"
         f"  |  ya existian: {resumen['omitidos']}")
     log("")
@@ -1169,11 +1117,9 @@ def generar_videos(cfg, log=print, progreso=None, should_stop=None):
     outro_es_audio = (bool(outro_path) and os.path.isfile(outro_path)
                       and os.path.splitext(outro_path)[1].lower() in AUDIO_EXTS)
 
-    # --- Etapa 1.5: pre-armar intro/outro/portada, UNA sola vez -------------
+    # --- Etapa 1.5: pre-armar intro/outro, UNA sola vez ---------------------
     segmentos_extra = {}
-    portada_segmentos = {}
     clips_outro = None      # solo se usa si se termina cayendo a recodificar
-    dur_intro2 = None       # idem
 
     try:
         if cfg.get("intro_path") and os.path.isfile(cfg["intro_path"]):
@@ -1195,50 +1141,24 @@ def generar_videos(cfg, log=print, progreso=None, should_stop=None):
             else:
                 segmentos_extra["outro"] = gameplay_pool.preparar_segmento_video(
                     outro_path, cfg)
-
-        if hay_portada:
-            dur_intro2 = get_duration(intro2_path)
-            imagenes = {t["portada_imagen"] for t in tareas if t["portada_imagen"]}
-            for imagen in imagenes:
-                portada_segmentos[imagen] = gameplay_pool.preparar_portada(
-                    imagen, intro2_path, dur_intro2, cfg)
     except Exception as e:
-        log(f"  [i] No se pudo preparar intro/outro/portada por copia ({e}); "
+        log(f"  [i] No se pudo preparar intro/outro por copia ({e}); "
             f"se recodificara en su lugar.")
         rapido = False
         segmentos_extra = {}
-        portada_segmentos = {}
 
-    if not rapido:
+    if not rapido and outro_es_audio:
         # Camino normal: hay que elegir gameplay de fondo para el outro de
         # audio (se recorta por filtro, no por copia).
-        if outro_es_audio:
-            try:
-                dur_outro = get_duration(outro_path)
-                clips_outro = pick_clips_for_duration(
-                    rutas_pool, duraciones_pool, dur_outro)
-            except Exception as e:
-                aviso = (f"No se pudo usar el outro de audio "
-                         f"({os.path.basename(outro_path)}): {e}")
-                log(f"  [!] {aviso}")
-                resumen["avisos"].append(aviso)
-        if hay_portada and dur_intro2 is None:
-            try:
-                dur_intro2 = get_duration(intro2_path)
-            except Exception as e:
-                aviso = f"No se pudo usar 'Intro 2' ({os.path.basename(intro2_path)}): {e}"
-                log(f"  [!] {aviso}")
-                resumen["avisos"].append(aviso)
-
-    def _portada_para(t):
-        imagen = t["portada_imagen"]
-        if not imagen:
-            return None
-        if rapido:
-            return portada_segmentos.get(imagen)
-        if not dur_intro2:
-            return None
-        return (imagen, intro2_path, dur_intro2)
+        try:
+            dur_outro = get_duration(outro_path)
+            clips_outro = pick_clips_for_duration(
+                rutas_pool, duraciones_pool, dur_outro)
+        except Exception as e:
+            aviso = (f"No se pudo usar el outro de audio "
+                     f"({os.path.basename(outro_path)}): {e}")
+            log(f"  [!] {aviso}")
+            resumen["avisos"].append(aviso)
 
     # El fallback de arriba puede haber cambiado "rapido": se recalcula el
     # estimado para que el porcentaje de la barra no quede desfasado.
@@ -1283,13 +1203,9 @@ def generar_videos(cfg, log=print, progreso=None, should_stop=None):
                 raise RuntimeError("el audio esta vacio o dañado")
 
             if rapido:
-                extras_t = dict(segmentos_extra)
-                portada_seg = _portada_para(t)
-                if portada_seg:
-                    extras_t["portada"] = portada_seg
                 ok = build_video_copia(
                     t["audio"], t["duracion"], clips_pool, t["salida"],
-                    segmentos_extra=extras_t,
+                    segmentos_extra=segmentos_extra,
                     on_progress=al_avanzar, should_stop=should_stop)
             else:
                 clips = pick_clips_for_duration(
@@ -1298,7 +1214,7 @@ def generar_videos(cfg, log=print, progreso=None, should_stop=None):
                     raise RuntimeError("no se pudieron elegir clips de gameplay")
                 ok = build_video(t["audio"], clips, t["salida"], cfg, encoder,
                                  on_progress=al_avanzar, should_stop=should_stop,
-                                 clips_outro=clips_outro, portada=_portada_para(t))
+                                 clips_outro=clips_outro)
 
             with resumen_lock:
                 if ok:

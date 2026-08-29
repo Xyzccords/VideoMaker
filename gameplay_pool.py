@@ -234,7 +234,7 @@ def _clave(origen, cfg):
 
 
 def _clave_segmento(origen, cfg, extra=""):
-    """Igual que _clave, pero para intro/outro/portada (no llevan branding)."""
+    """Igual que _clave, pero para intro/outro (no llevan branding)."""
     try:
         st = os.stat(origen)
         firma = f"{os.path.basename(origen)}|{st.st_size}|{int(st.st_mtime)}"
@@ -371,46 +371,3 @@ def preparar_segmento_video(origen, cfg):
     return destino
 
 
-def preparar_portada(imagen, audio, duracion, cfg):
-    """
-    Arma UNA sola vez la imagen fija + el audio de "Intro 2" de un fanfic,
-    en el mismo formato que el pool, para poder pegarla por copia despues.
-    Devuelve la ruta del archivo cacheado (no hace nada si ya existia).
-    """
-    pool_dir = carpeta_pool(cfg["gameplay_dir"])
-    os.makedirs(pool_dir, exist_ok=True)
-    clave = _clave_segmento(imagen, cfg, extra=os.path.basename(audio))
-    destino = os.path.join(pool_dir, f"portada_{clave}.mp4")
-    if os.path.isfile(destino):
-        return destino
-
-    ancho, alto, fps = int(cfg["width"]), int(cfg["height"]), int(cfg["fps"])
-    calidad = int(cfg["crf"])
-    tope = maxrate_kbps(cfg)
-    filtro = (f"scale={ancho}:{alto}:force_original_aspect_ratio=increase,"
-              f"crop={ancho}:{alto},fps={fps},setsar=1")
-
-    tmp = destino + ".parcial.mp4"
-    cmd = [
-        "ffmpeg", "-y", "-hide_banner", "-nostdin", "-loglevel", "error",
-        "-nostats", "-loop", "1", "-t", f"{duracion:.3f}", "-i", imagen,
-        "-i", audio, "-vf", filtro,
-        "-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq",
-        "-rc", "vbr", "-cq", str(calidad), "-b:v", "0",
-        "-maxrate", f"{tope}k", "-bufsize", f"{tope * 2}k",
-        "-bf", "0", "-g", str(fps), "-forced-idr", "1", "-no-scenecut", "1",
-        "-pix_fmt", "yuv420p", "-profile:v", "high", "-level", "4.1",
-        "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
-        "-shortest", tmp,
-    ]
-    r = subprocess.run(cmd, capture_output=True, text=True, creationflags=_SIN_VENTANA)
-    if r.returncode != 0 or not os.path.isfile(tmp):
-        if os.path.isfile(tmp):
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
-        raise RuntimeError((r.stderr or "ffmpeg fallo al preparar la portada").strip()[-500:])
-
-    os.replace(tmp, destino)
-    return destino

@@ -42,7 +42,6 @@ DEFAULTS = {
     "gameplay_dir": "",
     "logo_path": "",
     "intro_path": "",
-    "intro2_path": "",
     "outro_path": "",
     "font_path": r"C:\Windows\Fonts\arialbd.ttf",
     "watermark_text": "",
@@ -62,7 +61,7 @@ DEFAULTS = {
 # Estas claves guardan rutas: si apuntan a algo que ya no existe, se limpian
 # solas al abrir (el programa venia con rutas de otra PC).
 CLAVES_RUTA = ("canal_dir", "gameplay_dir", "logo_path", "intro_path",
-               "intro2_path", "outro_path", "font_path")
+               "outro_path", "font_path")
 
 PRESETS = ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow"]
 ENCODERS = ["auto", "h264_nvenc", "h264_qsv", "h264_amf", "libx264"]
@@ -428,9 +427,7 @@ class App(tk.Tk):
         marco.pack(fill="x")
 
         ttk.Label(marco, text="Aqui va la carpeta que contiene un subfolder por cada "
-                              "fanfic (cada uno con su carpeta \"Español\"). Si dentro "
-                              "de esa carpeta pones \"portada.jpg\", se usa como imagen "
-                              "de \"Intro 2\" (configurala en Otras Configuraciones).",
+                              "fanfic (cada uno con su carpeta \"Español\").",
                   style="Sub.TLabel").pack(anchor="w", pady=(0, 6))
 
         fila = ttk.Frame(marco)
@@ -518,13 +515,6 @@ class App(tk.Tk):
                    filetypes=[("Imagenes", "*.png *.jpg *.jpeg")])
         campo_ruta("Intro (video):", "intro_path", es_archivo=True,
                    filetypes=[("Video", "*.mp4 *.mkv *.mov")])
-        campo_ruta("Intro 2 (audio):", "intro2_path", es_archivo=True,
-                   filetypes=[("Audio", "*.mp3 *.wav *.m4a *.flac *.ogg *.opus "
-                                        "*.aac *.wma")],
-                   ayuda="Se pone justo despues de la Intro: suena este audio "
-                         "mientras se ve la imagen \"portada.jpg\" que pongas "
-                         "en la carpeta \"Español\" de cada fanfic. Si un "
-                         "fanfic no tiene esa imagen, se lo salta.")
         campo_ruta("Outro (video o audio):", "outro_path", es_archivo=True,
                    filetypes=[("Video o audio", "*.mp4 *.mkv *.mov *.mp3 *.wav "
                                                 "*.m4a *.flac *.ogg *.opus *.aac *.wma")],
