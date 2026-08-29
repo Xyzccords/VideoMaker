@@ -1,0 +1,177 @@
+VIDEOMAKER AUTOMATICO
+=====================
+
+Crea los videos del canal solo: junta cada audio con gameplay al azar y
+exporta el video ya listo.
+
+
+1) COMO SE ABRE
+---------------
+Con el acceso directo "VideoMaker Automatico" del Escritorio.
+Ese acceso ya NO abre ninguna ventana negra de CMD.
+
+Si algun dia mueves esta carpeta a otro sitio, vuelve a crear el acceso
+ejecutando una vez:
+
+    python crear_acceso_directo.py
+
+(El programa en si es "videomaker.pyw". La extension .pyw es la que evita
+la consola. El antiguo "interfaz.py" quedo guardado en la carpeta
+"_version_anterior" por si acaso; ya no se usa.)
+
+
+2) COMO SE USA
+--------------
+a) Arriba pones UNA sola ruta: la carpeta de tu canal.
+   Ya viene puesta:
+       C:\Users\ADMIN\Desktop\Carpetas\Fernando\CANALES\BOLILLO
+
+b) Justo debajo aparece solo la lista de tus fanfics. El programa entra a
+   cada carpeta de fanfic, busca dentro la subcarpeta "Español" y de ahi
+   saca los audios. No hay que indicarle nada mas.
+
+c) Todos los fanfics salen MARCADOS. Desmarca los que no quieras exportar
+   (por ejemplo, si solo agregaste uno nuevo, desmarca los demas).
+   Puedes hacer clic en la casilla o en cualquier parte de la fila.
+
+d) Boton "Generar videos".
+
+IMPORTANTE: antes de la primera vez, abre "Otras Configuraciones" y pon la
+CARPETA DE GAMEPLAYS (tus videos de fondo). Es la unica obligatoria ademas
+de la del canal. Si falta, el programa te avisa y no hace nada raro.
+
+
+3) DONDE QUEDAN LOS VIDEOS
+--------------------------
+En una carpeta "VIDEOS" que se crea sola dentro de BOLILLO:
+
+    BOLILLO\VIDEOS\
+
+Cada archivo se llama como su fanfic mas los capitulos que abarca:
+
+    Naruto_ My Sharingan Has An Exp Bar_1-8.mp4
+    The Boys_ Most Cautious Superhero_1-6.mp4
+
+El rango sale del nombre del audio ("Capitulo 1 al 8.mp3" -> "1-8").
+
+Los videos que ya existen se saltan solos. Asi que puedes volver a darle a
+"Generar videos" cuantas veces quieras: solo hara los que falten.
+
+
+4) BARRA DE PROGRESO
+--------------------
+Abajo tienes el porcentaje real, que video se esta haciendo (y cual de
+cuantos) y el tiempo aproximado que falta.
+
+Si quieres ver el detalle tecnico, abre "Ver detalles del proceso".
+
+
+5) AVISO AL TERMINAR
+--------------------
+Cuando acaba todo sale una notificacion de Windows (y un sonido) diciendo
+cuantos videos se hicieron. Si hubo algun problema, te lo dice ahi y ademas
+sale una ventana con la lista de errores.
+
+
+6) OTRAS CONFIGURACIONES
+------------------------
+Esta plegado para no estorbar. Ahi dentro estan:
+  - Carpeta de gameplays (obligatoria)
+  - Logo, intro, outro, fuente y texto de marca de agua (todo opcional)
+  - Ancho, alto, FPS, calidad y codificador
+  - Boton para rehacer los gameplays preparados
+
+Valores que quedaron puestos:
+  - 1280x720 a 30 fps  (antes estaba en 854x480 a 15 fps)
+  - Calidad 30         (antes 35, que se veia con cuadros)
+  - Audio AAC 192 kbps
+  - Codificador "auto"
+
+La calidad es el numero que mas manda en el PESO del archivo:
+  23 = maxima, se ve igual pero pesa el doble
+  30 = la puesta, buen equilibrio para gameplay de fondo
+  33 = ligera, si quieres archivos aun mas chicos
+
+Ojo: YouTube recodifica todo lo que subes, asi que subir a 23 en vez de 30
+casi no cambia lo que ve la gente, pero si duplica tu tiempo de subida.
+
+
+7) USO DEL CPU
+--------------
+En "Otras Configuraciones" hay una opcion "Uso del CPU":
+
+    bajo    -> 30.0x, usa 18% del procesador
+    medio   -> 31.6x, usa 21%   (el que viene puesto)
+    maximo  -> 31.6x, usa 21%
+
+Casi no hay diferencia de velocidad entre los tres, porque el trabajo
+pesado lo hace la tarjeta grafica, no el procesador. Antes el programa
+decodificaba por CPU y se comia el 48%; ahora decodifica por GPU.
+
+Ademas ffmpeg corre con prioridad baja (salvo en "maximo"), asi que puedes
+seguir usando la PC mientras genera sin que se sienta lenta.
+
+Si en el Administrador de tareas ves el CPU al 80 o 90%, fijate que no sea
+otro programa: el generador de voces, Discord, el navegador o Wallpaper
+Engine juntos pueden pasar del 25% por su cuenta.
+
+
+8) POR QUE AHORA VA MUCHO MAS RAPIDO
+------------------------------------
+Tus gameplays son 1080p a 120 fps. Antes, para CADA video, el programa
+tenia que decodificar todo eso entero solo para quedarse con 30 fotogramas
+por segundo. Ahi se iba el tiempo.
+
+Ahora hace dos cosas:
+
+  a) Convierte a una version ligera (1280x720 a 30 fps) SOLO los gameplays
+     que hagan falta, y los guarda en una subcarpeta "_VideoMaker_listos"
+     dentro de tu carpeta de gameplays. Usa la GPU para decodificar.
+
+     Ojo: no convierte todos. Si un gameplay YA viene ligero (por ejemplo
+     grabado en 720p a 30 fps), lo usa tal cual y no pierde tiempo. Medido:
+     desde un 720p30 original va a 29.5x y desde el preparado a 29.9x, o
+     sea igual. Solo vale la pena convertir los pesados:
+
+         1080p a 120 fps  -> directo 7.1x   preparado 28.9x   SI conviene
+         1080p a  60 fps  -> directo 17.1x  preparado 30.4x   si conviene
+          720p a  30 fps  -> directo 29.5x  preparado 29.9x   NO conviene
+
+     Asi que si grabas los gameplays ya livianos en OBS, cambiarlos cada
+     semana no te cuesta espera casi ninguna.
+
+  b) A partir de ahi, si no usas logo, marca de agua, intro ni outro,
+     los videos se arman PEGANDO esos gameplays sin volver a
+     recodificarlos. Es del orden de 50 veces mas rapido que tiempo real.
+     Si pones logo o marca de agua, hay que recodificar (porque hay que
+     dibujar encima), pero sigue siendo bastante mas rapido que antes.
+
+
+9) LA CARPETA DE GAMEPLAYS PREPARADOS
+-------------------------------------
+La carpeta "_VideoMaker_listos" se puede borrar sin miedo cuando quieras:
+se vuelve a crear sola. Tambien hay un boton para eso en "Otras
+Configuraciones". Si agregas gameplays nuevos, solo prepara los nuevos.
+
+
+10) LO QUE NECESITA EL PC
+-------------------------
+  - Python (ya lo tienes)
+  - ffmpeg y ffprobe en el PATH (ya los tienes)
+  - Pillow (opcional pero recomendado si usas logo o marca de agua: hace
+    los videos mas rapidos; tambien hace falta si quieres volver a generar
+    el logo):  pip install Pillow
+
+Tus rutas y opciones se guardan solas en "interfaz_config.json" al cerrar.
+
+
+11) ARCHIVOS
+------------
+  videomaker.pyw          la interfaz (esto es lo que se abre)
+  audiobook_core.py       el motor: escanea BOLILLO y genera los videos
+  gameplay_pool.py        prepara y cachea los gameplays ligeros
+  notificaciones.py       el aviso de Windows al terminar
+  generar_icono.py        crea el logo VM (ya esta hecho, no hace falta)
+  crear_acceso_directo.py crea el acceso del Escritorio
+  logo_vm.ico / .png      el logo
+  _version_anterior\      el programa viejo, por si acaso

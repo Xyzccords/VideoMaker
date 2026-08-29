@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+
+# ffmpeg/ffprobe binaries go here at runtime; not tracked in git (too heavy)
+bin/*
+!bin/.gitkeep
